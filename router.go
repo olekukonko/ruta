@@ -6,6 +6,15 @@ import (
 	"sync"
 )
 
+const (
+	Default = "default"
+	Slash   = "/"
+	Empty   = ""
+	Open    = "{"
+	Close   = "}"
+	Pram    = "param"
+)
+
 // ConnType defines the interface for network connections, such as WebSocket or TCP.
 // Implementations must support reading, writing, and closing the connection.
 type ConnType interface {
@@ -76,7 +85,7 @@ func (p *Params) Set(key, value string) {
 func (p *Params) Get(key string) (string, bool) {
 	val, ok := p.data.Load(key)
 	if !ok {
-		return "", false
+		return Empty, false
 	}
 	return val.(string), true
 }
@@ -117,7 +126,7 @@ func (n *Node) FindHandler(parts []string) (Handler, *Params) {
 	node := n
 
 	for i, part := range parts {
-		if part == "" && i == len(parts)-1 { // Skip trailing empty part
+		if part == Empty && i == len(parts)-1 { // Skip trailing empty part
 			break
 		}
 
@@ -190,7 +199,7 @@ func (r *Router) Group(fn func(RouteBase)) RouteBase {
 // Section groups routes under a common prefix (e.g., "/api/").
 // Nested sections accumulate prefixes (e.g., "/api/v1/").
 func (r *Router) Section(prefix string, fn func(RouteBase)) RouteBase {
-	prefix = strings.Trim(prefix, "/") + "/"
+	prefix = strings.Trim(prefix, Slash) + Slash
 	fullPrefix := r.prefix + prefix
 	fn(&Router{
 		root:       r.root,
@@ -202,28 +211,27 @@ func (r *Router) Section(prefix string, fn func(RouteBase)) RouteBase {
 }
 
 // Route registers a handler for a given pattern.
-// Use "default", "/", or "" for the base route at the current prefix.
+// Use "default", / , or Empty for the base route at the current prefix.
 // Example: Route("/user/{id}", handler) matches "/user/123".
 func (r *Router) Route(pattern string, handler Handler) {
-	pattern = strings.Trim(pattern, "/")
-	var fullPattern string
-
-	if pattern == "default" || pattern == "" {
-		fullPattern = strings.TrimRight(r.prefix, "/")
-		if fullPattern == "" {
-			fullPattern = "/"
+	pattern = strings.Trim(pattern, Slash)
+	var b strings.Builder
+	if pattern == Default || pattern == Empty {
+		b.WriteString(strings.TrimRight(r.prefix, Slash))
+		if b.Len() == 0 {
+			b.WriteString(Slash)
 		}
 	} else {
-		fullPattern = r.prefix
-		if pattern != "" {
-			fullPattern += pattern
+		b.WriteString(r.prefix)
+		if pattern != Empty {
+			b.WriteString(pattern)
 		}
-		if fullPattern == "" {
-			fullPattern = "/"
+		if b.Len() == 0 {
+			b.WriteString(Slash)
 		}
 	}
-
-	parts := strings.Split(fullPattern, "/")
+	fullPattern := b.String()
+	parts := strings.Split(fullPattern, Slash)
 	node := r.root
 
 	for _, part := range parts {
@@ -240,30 +248,41 @@ func (r *Router) Route(pattern string, handler Handler) {
 // Handle processes an incoming message by matching it to a route.
 // It executes the handler with middleware, writing errors if any occur.
 func (r *Router) Handle(ctx *Frame) {
+	frame := r.pool.Get().(*Frame)
+	frame.Conn = ctx.Conn
+	frame.Message = ctx.Message
+	frame.Errors = nil
+
 	message := strings.TrimSpace(string(ctx.Message))
-	parts := strings.Split(message, "/")
-	if len(parts) > 0 && parts[0] == "" {
-		parts = parts[1:] // Remove leading empty part
+	parts := strings.Split(message, Slash)
+	if len(parts) > 0 && parts[0] == Empty {
+		parts = parts[1:]
 	}
 
 	handler, params := r.root.FindHandler(parts)
 	if params != nil {
-		ctx.Params = params
+		frame.Params = params
 	}
 
 	if handler != nil {
-		handler(ctx)
-		if len(ctx.Errors) > 0 {
-			if writeErr := r.writeErrors(ctx); writeErr != nil {
-				fmt.Printf("Write error: %v\n", writeErr)
+		handler(frame)
+		if len(frame.Errors) > 0 {
+			if writeErr := r.writeErrors(frame); writeErr != nil {
+				frame.Errors = append(frame.Errors, writeErr)
 			}
 		}
 	} else {
-		ctx.Errors = append(ctx.Errors, fmt.Errorf("unknown command: %s", message))
-		if writeErr := r.writeErrors(ctx); writeErr != nil {
-			// Uncomment for debugging: fmt.Printf("Write error: %v\n", writeErr)
+		frame.Errors = append(frame.Errors, fmt.Errorf("unknown command: %s", message))
+		if writeErr := r.writeErrors(frame); writeErr != nil {
+			frame.Errors = append(frame.Errors, writeErr)
 		}
 	}
+
+	ctx.mu.Lock()
+	ctx.Errors = append(ctx.Errors, frame.Errors...)
+	ctx.mu.Unlock()
+
+	r.pool.Put(frame)
 }
 
 // writeErrors writes all collected errors to the connection.
@@ -294,28 +313,34 @@ func (r *Router) Apply(handler Handler, middleware []func(*Frame) error) Handler
 }
 
 // Routes returns a list of all registered route patterns.
-// Example: ["/", "/user/{id}", "/api/admin"].
+// Example: [Slash, "/user/{id}", "/api/admin"].
 func (r *Router) Routes() []string {
 	var routes []string
-	r.collectRoutes(r.root, "", &routes)
+	r.collectRoutes(r.root, Empty, &routes)
 	return routes
 }
 
 // collectRoutes recursively builds the list of route patterns from the trie.
+// It uses a strings.Builder to efficiently construct route paths.
 func (r *Router) collectRoutes(node *Node, currentPath string, routes *[]string) {
 	if node.handler != nil {
 		*routes = append(*routes, currentPath)
 	}
+
+	var b strings.Builder
 	for key, child := range node.children {
-		path := currentPath
-		if path != "" && !strings.HasSuffix(path, "/") {
-			path += "/"
+		b.Reset()
+		b.WriteString(currentPath)
+		if currentPath != Empty && !strings.HasSuffix(currentPath, Slash) {
+			b.WriteString(Slash)
 		}
 		if child.isParam {
-			path += "{" + child.paramName + "}"
+			b.WriteString(Open)
+			b.WriteString(child.paramName)
+			b.WriteString(Close)
 		} else {
-			path += key
+			b.WriteString(key)
 		}
-		r.collectRoutes(child, path, routes)
+		r.collectRoutes(child, b.String(), routes)
 	}
 }

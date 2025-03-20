@@ -29,7 +29,7 @@ func (c *mockConn) Reset() {
 	c.buf.Reset()
 }
 
-// BenchmarkHandle measures the performance of Handle with a simple route
+// BenchmarkHandle measures the original Handle
 func BenchmarkHandle(b *testing.B) {
 	router := NewRouter()
 	router.Route("/user/{id}", func(f *Frame) {
@@ -38,7 +38,7 @@ func BenchmarkHandle(b *testing.B) {
 	})
 
 	conn := &mockConn{}
-	frame := &Frame{
+	ctx := &Frame{
 		Conn:    conn,
 		Message: []byte("/user/john"),
 		Params:  NewParams(),
@@ -48,7 +48,8 @@ func BenchmarkHandle(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		conn.Reset()
-		router.Handle(frame)
+		ctx.Errors = nil // Reset for reuse
+		router.Handle(ctx)
 	}
 }
 
@@ -71,18 +72,18 @@ func BenchmarkHandleWithPool(b *testing.B) {
 	})
 
 	conn := &mockConn{}
-	input := []byte("/user/john")
+	ctx := &Frame{
+		Conn:    conn,
+		Message: []byte("/user/john"),
+		Params:  NewParams(),
+		Values:  make(map[string]interface{}),
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		conn.Reset()
-		frame := router.pool.Get().(*Frame)
-		frame.Conn = conn
-		frame.Message = input
-		frame.Errors = nil
-
-		router.Handle(frame)
-		router.pool.Put(frame)
+		ctx.Errors = nil // Reset for reuse
+		router.Handle(ctx)
 	}
 }
 
@@ -143,5 +144,21 @@ func BenchmarkHandleComplex(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		conn.Reset()
 		router.Handle(frame)
+	}
+}
+
+// BenchmarkCollectRoutes measures the performance of collectRoutes
+func BenchmarkCollectRoutes(b *testing.B) {
+	router := NewRouter()
+	router.Route("/user/{id}", func(f *Frame) {})
+	router.Route("/api/v1/user/{id}", func(f *Frame) {})
+	router.Route("/api/v1/admin", func(f *Frame) {})
+	router.Route("/static", func(f *Frame) {})
+
+	var routes []string
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		routes = routes[:0]                                                // Reset slice without reallocating
+		router.(*Router).collectRoutes(router.(*Router).root, "", &routes) // Cast to *Router
 	}
 }
