@@ -2,6 +2,7 @@ package ruta
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,8 +40,15 @@ type Frame struct {
 	Values  map[string]interface{} // User-defined values for middleware or handlers
 	Errors  []error                // Accumulated errors during processing
 	Route   string                 // Matched route pattern (e.g., "/user/{id}")
-	mu      sync.Mutex             // Protects Errors and Values from concurrent access
+	mu      sync.RWMutex           // Protects Errors and Values from concurrent access
 	Payload *Payload               // Payload
+}
+
+// AddError safely appends an error to the Frame's Errors slice.
+func (f *Frame) AddError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Errors = append(f.Errors, err)
 }
 
 // Command extracts the command from the payload.
@@ -48,63 +56,90 @@ func (f *Frame) Command() string {
 	return f.Payload.Command()
 }
 
-// Payload represents the message payload with command and data
+// Payload represents a message payload with a command and data.
+// It includes a buffer for efficient reuse across method calls.
 type Payload struct {
-	command string    // Extracted command
-	payload io.Reader // Payload data as a stream
+	command string       // Extracted command
+	payload io.Reader    // Payload data as a stream
+	buf     bytes.Buffer // Reusable buffer for reading payload data
 }
 
-// NewPayload creates a new Payload instance from the raw message
+// NewPayload creates a new Payload instance from the raw message.
 func NewPayload(rawMessage []byte) *Payload {
-	parts := strings.SplitN(string(rawMessage), " ", 2)
-	command := parts[0]
-	var payload io.Reader
-	if len(parts) > 1 {
-		payload = bytes.NewReader([]byte(parts[1]))
-	} else {
-		payload = bytes.NewReader([]byte(""))
+	idx := bytes.IndexByte(rawMessage, ' ')
+	if idx == -1 {
+		// No space, so the entire message is the command
+		return &Payload{
+			command: string(rawMessage),
+			payload: bytes.NewReader(nil), // Empty payload
+		}
 	}
-	return &Payload{command: command, payload: payload}
+	// Extract command and payload
+	command := string(rawMessage[:idx])
+	payload := bytes.NewReader(rawMessage[idx+1:])
+	return &Payload{
+		command: command,
+		payload: payload,
+	}
 }
 
-// Command returns the extracted command
+// Command returns the extracted command.
 func (p *Payload) Command() string {
 	return p.command
 }
 
-// Payload returns the payload as an io.Reader
+// Payload returns the payload as an io.Reader.
 func (p *Payload) Payload() io.Reader {
 	return p.payload
 }
 
-// Text reads the payload as a string
+// Text reads the payload as a string.
+// It reuses the internal buffer to reduce allocations.
 func (p *Payload) Text() (string, error) {
-	buf := new(bytes.Buffer)
-	_, err := io.Copy(buf, p.payload)
+	p.buf.Reset() // Reset the buffer before reuse
+	_, err := io.Copy(&p.buf, p.payload)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to read payload: %w", err)
 	}
-	return buf.String(), nil
+	return p.buf.String(), nil
 }
 
-// JSON decodes the payload as JSON into a target struct
-func (p *Payload) JSON(v interface{}) error {
-	buf := new(bytes.Buffer)
-	_, err := io.Copy(buf, p.payload)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(buf.Bytes(), v)
-}
-
-// Bytes reads the payload as raw bytes
+// Bytes reads the payload as raw bytes.
+// It reuses the internal buffer to reduce allocations.
 func (p *Payload) Bytes() ([]byte, error) {
-	buf := new(bytes.Buffer)
-	_, err := io.Copy(buf, p.payload)
+	p.buf.Reset() // Reset the buffer before reuse
+	_, err := io.Copy(&p.buf, p.payload)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read payload: %w", err)
 	}
-	return buf.Bytes(), nil
+	return p.buf.Bytes(), nil
+}
+
+// JSON decodes the payload as JSON into a target struct.
+// It uses json.NewDecoder for efficient streaming of JSON data.
+func (p *Payload) JSON(v interface{}) error {
+	decoder := json.NewDecoder(p.payload)
+	if err := decoder.Decode(v); err != nil {
+		return fmt.Errorf("failed to decode JSON: %w", err)
+	}
+	return nil
+}
+
+// Base64 decodes the payload from Base64.
+// It reads the payload as text first and then decodes it.
+func (p *Payload) Base64() ([]byte, error) {
+	// Read the payload as text
+	text, err := p.Text()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read payload for Base64 decoding: %w", err)
+	}
+
+	// Decode the Base64 data
+	decodedData, err := base64.StdEncoding.DecodeString(text)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode Base64: %w", err)
+	}
+	return decodedData, nil
 }
 
 // RouteBase defines the contract for routing functionality.
@@ -337,13 +372,13 @@ func (r *Router) Handle(ctx *Frame) error {
 		handler(frame)
 		if len(frame.Errors) > 0 {
 			if writeErr := r.writeErrors(frame); writeErr != nil {
-				frame.Errors = append(frame.Errors, writeErr)
+				frame.AddError(writeErr)
 			}
 		}
 	} else {
-		frame.Errors = append(frame.Errors, fmt.Errorf("unknown command: %s", command))
+		frame.AddError(fmt.Errorf("unknown command: %s", command))
 		if writeErr := r.writeErrors(frame); writeErr != nil {
-			frame.Errors = append(frame.Errors, writeErr)
+			frame.AddError(writeErr)
 		}
 	}
 
@@ -367,7 +402,7 @@ func (r *Router) writeErrors(ctx *Frame) error {
 	}
 	var errMsg strings.Builder
 	for i, err := range ctx.Errors {
-		if i >= ErrorLimit { // Limit to 10 errors
+		if i >= ErrorLimit {
 			break
 		}
 		errMsg.WriteString(err.Error() + "\n")
@@ -381,7 +416,7 @@ func (r *Router) Apply(handler Handler, middleware []func(*Frame) error) Handler
 	return func(ctx *Frame) {
 		for _, mw := range middleware {
 			if err := mw(ctx); err != nil {
-				ctx.Errors = append(ctx.Errors, err)
+				ctx.AddError(err)
 				return
 			}
 		}
