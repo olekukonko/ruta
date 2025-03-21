@@ -1,0 +1,177 @@
+<!-- static/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat Room</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            background-color: #f4f4f4;
+        }
+        #setup {
+            padding: 20px;
+            background: #e0e0e0;
+            text-align: center;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        #chat {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        #usersOnline {
+            padding: 10px;
+            background: #333;
+            color: white;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        #messages {
+            flex: 1;
+            padding: 15px;
+            overflow-y: auto;
+            background: #fff;
+            border-bottom: 1px solid #ddd;
+        }
+        #messages div {
+            margin: 8px 0;
+            padding: 10px;
+            border-radius: 5px;
+            max-width: 80%;
+            word-wrap: break-word;
+        }
+        #messages .system {
+            color: #666;
+            font-style: italic;
+            background: #f0f0f0;
+            text-align: center;
+        }
+        #messages .message {
+            background: #e9f7ef;
+            border-left: 4px solid #28a745;
+        }
+        #messageInput {
+            display: flex;
+            padding: 15px;
+            background: #fff;
+            box-shadow: 0 -2px 5px rgba(0,0,0,0.1);
+        }
+        #messageInput input {
+            flex: 1;
+            padding: 12px;
+            font-size: 16px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            outline: none;
+        }
+        #messageInput button, #joinButton {
+            padding: 12px 20px;
+            font-size: 16px;
+            margin-left: 10px;
+            border: none;
+            background-color: #28a745;
+            color: white;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        #messageInput button:hover, #joinButton:hover {
+            background-color: #218838;
+        }
+    </style>
+</head>
+<body>
+<div id="setup">
+    <input type="text" id="username" placeholder="Enter your username">
+    <button id="joinButton" onclick="joinChat()">Join Chat</button>
+</div>
+<div id="chat" style="display: none;">
+    <div id="usersOnline">Online users: </div>
+    <div id="messages"></div>
+    <div id="messageInput">
+        <input type="text" id="message" placeholder="Type your message..." onkeypress="if(event.key === 'Enter') sendMessage()">
+        <button onclick="sendMessage()">Send</button>
+    </div>
+</div>
+
+<script>
+    let ws;
+    let username = "";
+
+    function connect() {
+        ws = new WebSocket("ws://localhost:8080/ws");
+
+        ws.onmessage = function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                console.log("Received:", data);
+                switch(data.type) {
+                    case "system":
+                        if (data.content === "Connected. Please set your username") {
+                            addMessage(data.content, "system", data.timestamp);
+                        } else if (data.content !== "message sent") {
+                            addMessage(data.content, "system", data.timestamp);
+                        }
+                        break;
+                    case "message":
+                        addMessage(`${data.username}: ${data.content}`, "message", data.timestamp);
+                        break;
+                    case "users":
+                        document.getElementById("usersOnline").textContent = data.content;
+                        break;
+                }
+            } catch (e) {
+                console.error("Error parsing message:", e);
+                addMessage(event.data, "system");
+            }
+        };
+
+        ws.onclose = function() {
+            addMessage("Disconnected from server", "system");
+        };
+    }
+
+    function joinChat() {
+        username = document.getElementById("username").value.trim();
+        if (username) {
+            ws.send(`/join {"username":"${username}"}`);
+            document.getElementById("setup").style.display = "none";
+            document.getElementById("chat").style.display = "flex";
+            setTimeout(updateUsers, 1000);
+        }
+    }
+
+    function sendMessage() {
+        const input = document.getElementById("message");
+        const content = input.value.trim();
+        if (content && username) {
+            ws.send(`/mess/send ${username} ${content}`);
+            console.log("Sent:", `/mess/send ${username} ${content}`);
+            input.value = "";
+        }
+    }
+
+    function updateUsers() {
+        ws.send(`/users`);
+    }
+
+    function addMessage(text, type = "normal", timestamp = "") {
+        const messages = document.getElementById("messages");
+        const message = document.createElement("div");
+        message.textContent = timestamp ? `[${timestamp}] ${text}` : text;
+        message.className = type === "system" ? "system" : "message";
+        messages.appendChild(message);
+        messages.scrollTop = messages.scrollHeight;
+    }
+
+    connect();
+</script>
+</body>
+</html>
