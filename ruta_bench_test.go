@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// mockConn is a minimal ConnType for benchmarking
+// mockConn is a minimal Connection for benchmarking
 type mockConn struct {
 	buf bytes.Buffer
 }

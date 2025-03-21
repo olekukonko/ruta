@@ -1,23 +1,27 @@
 package ruta
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 )
 
 const (
-	Default = "default"
-	Slash   = "/"
-	Empty   = ""
-	Open    = "{"
-	Close   = "}"
-	Pram    = "param"
+	Default    = "default"
+	Slash      = "/"
+	Empty      = ""
+	Open       = "{"
+	Close      = "}"
+	Param      = "param"
+	ErrorLimit = 10
 )
 
-// ConnType defines the interface for network connections, such as WebSocket or TCP.
+// Connection defines the interface for network connections, such as WebSocket or TCP.
 // Implementations must support reading, writing, and closing the connection.
-type ConnType interface {
+type Connection interface {
 	Read() ([]byte, error)
 	Write(message []byte) error
 	Close() error
@@ -30,13 +34,78 @@ type Handler func(*Frame)
 // Frame encapsulates data for a single routing request.
 // It is thread-safe for concurrent access to Params and Errors.
 type Frame struct {
-	Conn    ConnType               // Connection to the client
+	Conn    Connection             // Connection to the client
 	Message []byte                 // Raw incoming message
 	Params  *Params                // Route parameters (e.g., {"id": "123"})
 	Values  map[string]interface{} // User-defined values for middleware or handlers
 	Errors  []error                // Accumulated errors during processing
 	Route   string                 // Matched route pattern (e.g., "/user/{id}")
-	mu      sync.RWMutex           // Protects Errors and Values from concurrent access
+	mu      sync.Mutex             // Protects Errors and Values from concurrent access
+	Payload *Payload               // Payload
+}
+
+// Command extracts the command from the payload.
+func (f *Frame) Command() string {
+	return f.Payload.Command()
+}
+
+// Payload represents the message payload with command and data
+type Payload struct {
+	command string    // Extracted command
+	payload io.Reader // Payload data as a stream
+}
+
+// NewPayload creates a new Payload instance from the raw message
+func NewPayload(rawMessage []byte) *Payload {
+	parts := strings.SplitN(string(rawMessage), " ", 2)
+	command := parts[0]
+	var payload io.Reader
+	if len(parts) > 1 {
+		payload = bytes.NewReader([]byte(parts[1]))
+	} else {
+		payload = bytes.NewReader([]byte(""))
+	}
+	return &Payload{command: command, payload: payload}
+}
+
+// Command returns the extracted command
+func (p *Payload) Command() string {
+	return p.command
+}
+
+// Payload returns the payload as an io.Reader
+func (p *Payload) Payload() io.Reader {
+	return p.payload
+}
+
+// Text reads the payload as a string
+func (p *Payload) Text() (string, error) {
+	buf := new(bytes.Buffer)
+	_, err := io.Copy(buf, p.payload)
+	if err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// JSON decodes the payload as JSON into a target struct
+func (p *Payload) JSON(v interface{}) error {
+	buf := new(bytes.Buffer)
+	_, err := io.Copy(buf, p.payload)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(buf.Bytes(), v)
+}
+
+// Bytes reads the payload as raw bytes
+func (p *Payload) Bytes() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	_, err := io.Copy(buf, p.payload)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // RouteBase defines the contract for routing functionality.
@@ -215,26 +284,21 @@ func (r *Router) Section(prefix string, fn func(RouteBase)) RouteBase {
 // Example: Route("/user/{id}", handler) matches "/user/123".
 func (r *Router) Route(pattern string, handler Handler) {
 	pattern = strings.Trim(pattern, Slash)
-	var b strings.Builder
+	var fullPattern string
 	if pattern == Default || pattern == Empty {
-		b.WriteString(strings.TrimRight(r.prefix, Slash))
-		if b.Len() == 0 {
-			b.WriteString(Slash)
+		fullPattern = r.prefix
+		if fullPattern == "" {
+			fullPattern = Slash
 		}
 	} else {
-		b.WriteString(r.prefix)
-		if pattern != Empty {
-			b.WriteString(pattern)
-		}
-		if b.Len() == 0 {
-			b.WriteString(Slash)
-		}
+		fullPattern = r.prefix + pattern
 	}
-	fullPattern := b.String()
 	parts := strings.Split(fullPattern, Slash)
 	node := r.root
-
 	for _, part := range parts {
+		if part == "" {
+			continue
+		}
 		key := part
 		isParam := len(part) > 2 && part[0] == '{' && part[len(part)-1] == '}'
 		if isParam {
@@ -251,10 +315,16 @@ func (r *Router) Handle(ctx *Frame) {
 	frame := r.pool.Get().(*Frame)
 	frame.Conn = ctx.Conn
 	frame.Message = ctx.Message
+	frame.Values = make(map[string]interface{})
 	frame.Errors = nil
+	frame.Route = ""
 
-	message := strings.TrimSpace(string(ctx.Message))
-	parts := strings.Split(message, Slash)
+	// Initialize Payload
+	frame.Payload = NewPayload(ctx.Message)
+
+	// Extract command for routing
+	command := frame.Payload.Command()
+	parts := strings.Split(command, Slash)
 	if len(parts) > 0 && parts[0] == Empty {
 		parts = parts[1:]
 	}
@@ -272,7 +342,7 @@ func (r *Router) Handle(ctx *Frame) {
 			}
 		}
 	} else {
-		frame.Errors = append(frame.Errors, fmt.Errorf("unknown command: %s", message))
+		frame.Errors = append(frame.Errors, fmt.Errorf("unknown command: %s", command))
 		if writeErr := r.writeErrors(frame); writeErr != nil {
 			frame.Errors = append(frame.Errors, writeErr)
 		}
@@ -292,7 +362,10 @@ func (r *Router) writeErrors(ctx *Frame) error {
 		return nil
 	}
 	var errMsg strings.Builder
-	for _, err := range ctx.Errors {
+	for i, err := range ctx.Errors {
+		if i >= ErrorLimit { // Limit to 10 errors
+			break
+		}
 		errMsg.WriteString(err.Error() + "\n")
 	}
 	return ctx.Conn.Write([]byte(errMsg.String()))

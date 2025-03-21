@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// MockConn is a mock implementation of ConnType for testing
+// MockConn is a mock implementation of Connection for testing
 type MockConn struct {
 	Buffer bytes.Buffer
 	Closed bool
