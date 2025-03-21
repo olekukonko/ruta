@@ -40,9 +40,8 @@ func BenchmarkHandle(b *testing.B) {
 	conn := &mockConn{}
 	ctx := &Frame{
 		Conn:    conn,
-		Message: []byte("/user/john"),
+		Payload: NewPayload([]byte("/user/john")),
 		Params:  NewParams(),
-		Values:  make(map[string]interface{}),
 	}
 
 	b.ResetTimer()
@@ -62,7 +61,6 @@ func BenchmarkHandleWithPool(b *testing.B) {
 		New: func() interface{} {
 			return &Frame{
 				Params: NewParams(),
-				Values: make(map[string]interface{}),
 			}
 		},
 	}
@@ -74,9 +72,8 @@ func BenchmarkHandleWithPool(b *testing.B) {
 	conn := &mockConn{}
 	ctx := &Frame{
 		Conn:    conn,
-		Message: []byte("/user/john"),
+		Payload: NewPayload([]byte("/user/john")),
 		Params:  NewParams(),
-		Values:  make(map[string]interface{}),
 	}
 
 	b.ResetTimer()
@@ -135,9 +132,8 @@ func BenchmarkHandleComplex(b *testing.B) {
 	conn := &mockConn{}
 	frame := &Frame{
 		Conn:    conn,
-		Message: []byte("/api/user/john"),
+		Payload: NewPayload([]byte("/api/user/john")),
 		Params:  NewParams(),
-		Values:  make(map[string]interface{}),
 	}
 
 	b.ResetTimer()
