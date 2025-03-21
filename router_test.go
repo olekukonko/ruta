@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// MockConn is a mock implementation of Connection for testing
+// MockConn is a mock implementation of ConnType for testing
 type MockConn struct {
 	Buffer bytes.Buffer
 	Closed bool
@@ -200,7 +200,7 @@ func TestNode(t *testing.T) {
 			conn := &MockConn{}
 			ctx := &Frame{
 				Conn:    conn,
-				Message: []byte(strings.Join(tt.parts, "/")),
+				Payload: NewPayload([]byte(strings.Join(tt.parts, "/"))), // Use Payload instead of Message
 				Params:  NewParams(),
 				Values:  make(map[string]interface{}),
 			}
@@ -414,6 +414,18 @@ func TestRouter(t *testing.T) {
 			wantOut: "Service Use\nAdmin Group Use\nadmin yes\n",
 			wantRts: []string{"service/admin", "service/admin/yes"},
 		},
+		{
+			name: "No payload",
+			setup: func(r RouteBase) {
+				r.Route("hello", func(ctx *Frame) {
+					ctx.Conn.Write([]byte("hi\n"))
+				})
+			},
+			input:   "", // Will trigger "no payload" error
+			wantOut: "",
+			wantErr: true,
+			wantRts: []string{"hello"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -432,14 +444,23 @@ func TestRouter(t *testing.T) {
 
 			// Test route handling
 			conn := &MockConn{}
-			ctx := &Frame{
-				Conn:    conn,
-				Message: []byte(tt.input),
-				Params:  NewParams(),
-				Values:  make(map[string]interface{}),
+			var ctx *Frame
+			if tt.input != "" {
+				ctx = &Frame{
+					Conn:    conn,
+					Payload: NewPayload([]byte(tt.input)), // Use Payload instead of Message
+					Params:  NewParams(),
+					Values:  make(map[string]interface{}),
+				}
+			} else {
+				ctx = &Frame{
+					Conn:   conn,
+					Params: NewParams(),
+					Values: make(map[string]interface{}),
+				}
 			}
 
-			router.Handle(ctx)
+			err := router.Handle(ctx)
 
 			// Check output
 			gotOut := conn.Buffer.String()
@@ -448,8 +469,9 @@ func TestRouter(t *testing.T) {
 			}
 
 			// Check errors
-			if (len(ctx.Errors) > 0) != tt.wantErr {
-				t.Errorf("Handle() errors = %v, wantErr %v", ctx.Errors, tt.wantErr)
+			hasErr := err != nil
+			if hasErr != tt.wantErr {
+				t.Errorf("Handle() error = %v, wantErr %v", err, tt.wantErr)
 			}
 
 			conn.Reset()
@@ -478,11 +500,14 @@ func TestConcurrentRouteHandling(t *testing.T) {
 			defer wg.Done()
 			ctx := &Frame{
 				Conn:    conn,
-				Message: []byte("/test"),
+				Payload: NewPayload([]byte("/test")), // Use Payload instead of Message
 				Params:  NewParams(),
 				Values:  make(map[string]interface{}),
 			}
-			router.Handle(ctx)
+			err := router.Handle(ctx)
+			if err != nil {
+				t.Errorf("Handle() error in goroutine %d: %v", i, err)
+			}
 		}(conns[i], i)
 	}
 

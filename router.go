@@ -35,7 +35,6 @@ type Handler func(*Frame)
 // It is thread-safe for concurrent access to Params and Errors.
 type Frame struct {
 	Conn    Connection             // Connection to the client
-	Message []byte                 // Raw incoming message
 	Params  *Params                // Route parameters (e.g., {"id": "123"})
 	Values  map[string]interface{} // User-defined values for middleware or handlers
 	Errors  []error                // Accumulated errors during processing
@@ -127,7 +126,7 @@ type RouteBase interface {
 	With(middleware ...func(*Frame) error) RouteBase
 
 	// Handle processes an incoming message and invokes the matching handler.
-	Handle(ctx *Frame)
+	Handle(ctx *Frame) error
 
 	// Routes returns all registered route patterns.
 	Routes() []string
@@ -311,18 +310,18 @@ func (r *Router) Route(pattern string, handler Handler) {
 
 // Handle processes an incoming message by matching it to a route.
 // It executes the handler with middleware, writing errors if any occur.
-func (r *Router) Handle(ctx *Frame) {
+func (r *Router) Handle(ctx *Frame) error {
+	if ctx.Payload == nil {
+		return fmt.Errorf("no payload provided")
+	}
+
 	frame := r.pool.Get().(*Frame)
 	frame.Conn = ctx.Conn
-	frame.Message = ctx.Message
 	frame.Values = make(map[string]interface{})
 	frame.Errors = nil
 	frame.Route = ""
+	frame.Payload = ctx.Payload // Use provided Payload
 
-	// Initialize Payload
-	frame.Payload = NewPayload(ctx.Message)
-
-	// Extract command for routing
 	command := frame.Payload.Command()
 	parts := strings.Split(command, Slash)
 	if len(parts) > 0 && parts[0] == Empty {
@@ -353,6 +352,11 @@ func (r *Router) Handle(ctx *Frame) {
 	ctx.mu.Unlock()
 
 	r.pool.Put(frame)
+
+	if len(ctx.Errors) > 0 {
+		return fmt.Errorf("errors occurred during handling: %v", ctx.Errors)
+	}
+	return nil
 }
 
 // writeErrors writes all collected errors to the connection.
