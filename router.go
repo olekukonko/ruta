@@ -44,6 +44,21 @@ type Frame struct {
 	Payload *Payload               // Payload
 }
 
+// Push safely push entry to Values.
+func (f *Frame) Push(key string, value interface{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Values[key] = value
+}
+
+// Pull safely pull entry from Values
+func (f *Frame) Pull(key string) (interface{}, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.Values[key]
+	return v, ok
+}
+
 // AddError safely appends an error to the Frame's Errors slice.
 func (f *Frame) AddError(err error) {
 	f.mu.Lock()
@@ -60,26 +75,28 @@ func (f *Frame) Command() string {
 // It includes a buffer for efficient reuse across method calls.
 type Payload struct {
 	command string       // Extracted command
-	payload io.Reader    // Payload data as a stream
+	payload []byte       // Payload data as a stream
 	buf     bytes.Buffer // Reusable buffer for reading payload data
 }
 
 // NewPayload creates a new Payload instance from the raw message.
 func NewPayload(rawMessage []byte) *Payload {
 	idx := bytes.IndexByte(rawMessage, ' ')
+
 	if idx == -1 {
 		// No space, so the entire message is the command
 		return &Payload{
 			command: string(rawMessage),
-			payload: bytes.NewReader(nil), // Empty payload
+			payload: nil, // Empty payload
 		}
 	}
 	// Extract command and payload
 	command := string(rawMessage[:idx])
-	payload := bytes.NewReader(rawMessage[idx+1:])
+	// payload := bytes.NewReader(rawMessage[idx+1:])
+
 	return &Payload{
 		command: command,
-		payload: payload,
+		payload: rawMessage[idx+1:],
 	}
 }
 
@@ -90,39 +107,25 @@ func (p *Payload) Command() string {
 
 // Payload returns the payload as an io.Reader.
 func (p *Payload) Payload() io.Reader {
-	return p.payload
+	return bytes.NewReader(p.payload)
 }
 
 // Text reads the payload as a string.
 // It reuses the internal buffer to reduce allocations.
 func (p *Payload) Text() (string, error) {
-	p.buf.Reset() // Reset the buffer before reuse
-	_, err := io.Copy(&p.buf, p.payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to read payload: %w", err)
-	}
-	return p.buf.String(), nil
+	return string(p.payload), nil
 }
 
 // Bytes reads the payload as raw bytes.
 // It reuses the internal buffer to reduce allocations.
 func (p *Payload) Bytes() ([]byte, error) {
-	p.buf.Reset() // Reset the buffer before reuse
-	_, err := io.Copy(&p.buf, p.payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read payload: %w", err)
-	}
-	return p.buf.Bytes(), nil
+	return p.payload, nil
 }
 
 // JSON decodes the payload as JSON into a target struct.
 // It uses json.NewDecoder for efficient streaming of JSON data.
 func (p *Payload) JSON(v interface{}) error {
-	decoder := json.NewDecoder(p.payload)
-	if err := decoder.Decode(v); err != nil {
-		return fmt.Errorf("failed to decode JSON: %w", err)
-	}
-	return nil
+	return json.Unmarshal(p.payload, v)
 }
 
 // Base64 decodes the payload from Base64.
